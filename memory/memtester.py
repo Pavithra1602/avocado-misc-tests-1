@@ -16,6 +16,8 @@
 #
 
 import os
+import shutil
+import re
 from avocado import Test
 from avocado.utils import process, build, memory, archive
 from avocado.utils.software_manager.manager import SoftwareManager
@@ -42,6 +44,39 @@ class Memtester(Test):
         for pkg in ['gcc', 'make']:
             if not smm.check_installed(pkg) and not smm.install(pkg):
                 self.cancel('%s is needed for the test to be run' % pkg)
+        self.gcc_backup_path = None
+        self.gcc_replaced = False
+        try:
+            gcc_version_output = process.run('gcc --version', shell=True).stdout_text
+            version_match = re.search(r'gcc.*?(\d+)\.', gcc_version_output)
+            if version_match:
+                gcc_major_version = int(version_match.group(1))
+                self.log.info(f"Detected GCC version: {gcc_major_version}")
+                if gcc_major_version >= 15:
+                    self.log.info("GCC version >= 15 detected, replacing with GCC-13")
+                    gcc13_path = '/usr/bin/gcc-13'
+                    if not os.path.exists(gcc13_path):
+                        self.log.info("gcc-13 not found, attempting to install")
+                        if not smm.check_installed('gcc13') and not smm.install('gcc13'):
+                            if not smm.check_installed('gcc-13') and not smm.install('gcc-13'):
+                                self.cancel('gcc-13 is required but could not be installed')
+                        if not os.path.exists(gcc13_path):
+                            self.cancel('gcc-13 package installed but binary not found at /usr/bin/gcc-13')
+                    gcc_path = '/usr/bin/gcc'
+                    self.gcc_backup_path = '/usr/bin/gcc.backup.memtester'
+                    try:
+                        shutil.copy2(gcc_path, self.gcc_backup_path)
+                        self.log.info(f"Backed up {gcc_path} to {self.gcc_backup_path}")
+                        shutil.copy2(gcc13_path, gcc_path)
+                        self.gcc_replaced = True
+                        self.log.info(f"Replaced {gcc_path} with {gcc13_path}")
+                    except Exception as e:
+                        self.log.error(f"Failed to replace GCC: {e}")
+                        if os.path.exists(self.gcc_backup_path):
+                            os.remove(self.gcc_backup_path)
+                        raise
+        except Exception as e:
+            self.log.warning(f"Could not check GCC version: {e}")
         tarball = self.fetch_asset('memtester.zip',
                                    locations=['https://github.com/jnavila/'
                                               'memtester/archive/master.zip'],
@@ -52,6 +87,23 @@ class Memtester(Test):
         process.system('chmod 755 extra-libs.sh', shell=True, sudo=True,
                        ignore_status=True)
         build.make(sourcedir)
+
+    def tearDown(self):
+        '''
+        Restore original GCC if it was replaced
+        '''
+        gcc_replaced = getattr(self, 'gcc_replaced', False)
+        gcc_backup_path = getattr(self, 'gcc_backup_path', None)
+        if gcc_replaced and gcc_backup_path:
+            try:
+                gcc_path = '/usr/bin/gcc'
+                if os.path.exists(gcc_backup_path):
+                    shutil.copy2(gcc_backup_path, gcc_path)
+                    self.log.info(f"Restored original GCC from {gcc_backup_path}")
+                    os.remove(gcc_backup_path)
+                    self.log.info(f"Removed backup file {gcc_backup_path}")
+            except Exception as e:
+                self.log.error(f"Failed to restore original GCC: {e}")
 
     def test(self):
         '''
